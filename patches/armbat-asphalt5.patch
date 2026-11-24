@@ -1,0 +1,185 @@
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index 1dbcbc6..a875977 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -10,7 +10,7 @@ android {
+     ndkVersion = "29.0.13113456"
+ 
+     defaultConfig {
+-        applicationId = "dev.armbat"
++        applicationId = "com.androidevolved.asphalt5"
+         minSdk = 31
+         targetSdk = 36
+         versionCode = 5
+diff --git a/app/src/main/java/dev/armbat/GuestDex.kt b/app/src/main/java/dev/armbat/GuestDex.kt
+index 0d2ec60..6ef1953 100644
+--- a/app/src/main/java/dev/armbat/GuestDex.kt
++++ b/app/src/main/java/dev/armbat/GuestDex.kt
+@@ -20,6 +20,7 @@ import com.android.tools.smali.dexlib2.iface.instruction.formats.Instruction31c
+ import com.android.tools.smali.dexlib2.iface.instruction.formats.Instruction35c
+ import com.android.tools.smali.dexlib2.iface.instruction.formats.Instruction3rc
+ import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
++import com.android.tools.smali.dexlib2.iface.reference.FieldReference
+ import com.android.tools.smali.dexlib2.iface.reference.MethodReference
+ import com.android.tools.smali.dexlib2.iface.reference.StringReference
+ import com.android.tools.smali.dexlib2.iface.reference.TypeReference
+@@ -27,6 +28,7 @@ import com.android.tools.smali.dexlib2.immutable.instruction.ImmutableInstructio
+ import com.android.tools.smali.dexlib2.immutable.instruction.ImmutableInstruction31c
+ import com.android.tools.smali.dexlib2.immutable.instruction.ImmutableInstruction35c
+ import com.android.tools.smali.dexlib2.immutable.instruction.ImmutableInstruction3rc
++import com.android.tools.smali.dexlib2.immutable.reference.ImmutableFieldReference
+ import com.android.tools.smali.dexlib2.immutable.reference.ImmutableMethodReference
+ import com.android.tools.smali.dexlib2.immutable.reference.ImmutableStringReference
+ import com.android.tools.smali.dexlib2.immutable.reference.ImmutableTypeReference
+@@ -76,7 +78,7 @@ import java.util.zip.ZipFile
+ object GuestDex {
+ 
+     /** Bump when the rewrite rules or the cache layout change. */
+-    private const val CACHE_VERSION = 7
++    private const val CACHE_VERSION = 8
+ 
+     private const val CACHE_MARKER = ".ok"
+     private const val DEX_CLASS_LOADER_CLASS = "Ldalvik/system/DexClassLoader;"
+@@ -199,6 +201,10 @@ object GuestDex {
+             ArmbatLog.w("Armbat", "dex ${file.name} not readable: $error")
+             return
+         }
++        val adaptAsphalt5Clip = packageName == "com.gameloft.android.GAND.GloftA5HD" &&
++            MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") {
++                "%02x".format(it)
++            } == "1648f20858dfded189ad1ec7d5ef954808bdd16791bdff27a56385b60511c148"
+         val rewriter = DexRewriter(object : RewriterModule() {
+             override fun getInstructionRewriter(rewriters: Rewriters): Rewriter<Instruction> {
+                 // Track uninitialized DexClassLoader allocations by register.
+@@ -209,6 +215,24 @@ object GuestDex {
+                 var nextDexLoaderObjectId = 0
+                 return object : InstructionRewriter(rewriters) {
+                     override fun rewrite(instruction: Instruction): Instruction {
++                        if (adaptAsphalt5Clip &&
++                            instruction is Instruction21c && instruction.opcode == Opcode.SGET_OBJECT
++                        ) {
++                            val field = instruction.reference as? FieldReference
++                            val regionOp = "Landroid/graphics/Region\$Op;"
++                            if (field?.definingClass == regionOp && field.name == "REPLACE" &&
++                                field.type == regionOp
++                            ) {
++                                // The installer saves and restores the Canvas around each sprite.
++                                // Modern Android clips inside the parent view's current bounds.
++                                return ImmutableInstruction21c(
++                                    instruction.opcode,
++                                    instruction.registerA,
++                                    ImmutableFieldReference(regionOp, "INTERSECT", regionOp),
++                                )
++                            }
++                        }
++
+                         if (instruction is Instruction21c && instruction.opcode == Opcode.NEW_INSTANCE) {
+                             pendingDexLoaderObjects.remove(instruction.registerA)
+                             if ((instruction.reference as? TypeReference)?.type == DEX_CLASS_LOADER_CLASS) {
+diff --git a/app/src/main/java/dev/armbat/GuestStorage.kt b/app/src/main/java/dev/armbat/GuestStorage.kt
+index 11bced9..768b0f7 100644
+--- a/app/src/main/java/dev/armbat/GuestStorage.kt
++++ b/app/src/main/java/dev/armbat/GuestStorage.kt
+@@ -18,9 +18,9 @@ import androidx.core.net.toUri
+  * copying it out. The layout mirrors what an installed application has, one
+  * level below the container's own folder:
+  *
+- *     armbat/<name>.apk
+- *     armbat/android/data/<package>/{files,cache,databases,shared_prefs}
+- *     armbat/android/obb/<package>
++ *     asphalt5-evolved/<name>.apk
++ *     asphalt5-evolved/android/data/<package>/{files,cache,databases,shared_prefs}
++ *     asphalt5-evolved/android/obb/<package>
+  *
+  * The shared storage is only reachable with "all files access": since Android
+  * 11 an application cannot read an arbitrary folder on /sdcard without it.
+@@ -30,7 +30,7 @@ import androidx.core.net.toUri
+ object GuestStorage {
+ 
+     /** The folder under the shared storage root. */
+-    private const val FOLDER = "armbat"
++    private const val FOLDER = "asphalt5-evolved"
+ 
+     /** Shared storage root, e.g. /storage/emulated/0. */
+     @Suppress("DEPRECATION")
+diff --git a/app/src/main/res/values-es/strings.xml b/app/src/main/res/values-es/strings.xml
+index d99875c..800416a 100644
+--- a/app/src/main/res/values-es/strings.xml
++++ b/app/src/main/res/values-es/strings.xml
+@@ -41,7 +41,7 @@
+     <string name="ok">ACEPTAR</string>
+     <string name="error_permission">Permiso READ_PHONE_STATE denegado</string>
+     <string name="storage_access_title">Acceso a archivos</string>
+-    <string name="storage_access_detail">Permite el acceso a todos los archivos para que el contenedor use /sdcard/armbat.</string>
++    <string name="storage_access_detail">Permite el acceso a todos los archivos para que el contenedor use /sdcard/asphalt5-evolved.</string>
+     <string name="error_no_activity">No hay actividad en el manifiesto</string>
+     <string name="error_no_dex">No hay classes.dex en el APK</string>
+     <string name="error_not_activity">%1$s no es una actividad</string>
+diff --git a/app/src/main/res/values-hi/strings.xml b/app/src/main/res/values-hi/strings.xml
+index 6896ab8..ed867ed 100644
+--- a/app/src/main/res/values-hi/strings.xml
++++ b/app/src/main/res/values-hi/strings.xml
+@@ -41,7 +41,7 @@
+     <string name="ok">ठीक है</string>
+     <string name="error_permission">READ_PHONE_STATE अनुमति अस्वीकृत</string>
+     <string name="storage_access_title">फ़ाइलों तक पहुँच</string>
+-    <string name="storage_access_detail">/sdcard/armbat इस्तेमाल करने के लिए सभी फ़ाइलों तक पहुँच दें।</string>
++    <string name="storage_access_detail">/sdcard/asphalt5-evolved इस्तेमाल करने के लिए सभी फ़ाइलों तक पहुँच दें।</string>
+     <string name="error_no_activity">मैनिफ़ेस्ट में कोई गतिविधि नहीं</string>
+     <string name="error_no_dex">APK में classes.dex नहीं है</string>
+     <string name="error_not_activity">%1$s कोई गतिविधि नहीं है</string>
+diff --git a/app/src/main/res/values-ru/strings.xml b/app/src/main/res/values-ru/strings.xml
+index 0bc410c..959ca53 100644
+--- a/app/src/main/res/values-ru/strings.xml
++++ b/app/src/main/res/values-ru/strings.xml
+@@ -41,7 +41,7 @@
+     <string name="ok">ОК</string>
+     <string name="error_permission">Нет разрешения READ_PHONE_STATE</string>
+     <string name="storage_access_title">Доступ к файлам</string>
+-    <string name="storage_access_detail">Разрешите доступ ко всем файлам, чтобы контейнер использовал /sdcard/armbat.</string>
++    <string name="storage_access_detail">Разрешите доступ ко всем файлам, чтобы контейнер использовал /sdcard/asphalt5-evolved.</string>
+     <string name="error_no_activity">В манифесте нет Activity</string>
+     <string name="error_no_dex">В APK нет classes.dex</string>
+     <string name="error_not_activity">%1$s  не Activity</string>
+diff --git a/app/src/main/res/values-zh/strings.xml b/app/src/main/res/values-zh/strings.xml
+index 2d00f67..da0dddf 100644
+--- a/app/src/main/res/values-zh/strings.xml
++++ b/app/src/main/res/values-zh/strings.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <string name="app_name">Armbat</string>
++    <string name="app_name">Asphalt 5 Android Evolved</string>
+ 
+     <string name="search_hint">搜索</string>
+     <string name="empty_title">没有应用</string>
+@@ -43,7 +43,7 @@
+     <string name="ok">确定</string>
+     <string name="error_permission">READ_PHONE_STATE 权限被拒绝</string>
+     <string name="storage_access_title">文件访问权限</string>
+-    <string name="storage_access_detail">请允许访问所有文件，以便容器使用 /sdcard/armbat。</string>
++    <string name="storage_access_detail">请允许访问所有文件，以便容器使用 /sdcard/asphalt5-evolved。</string>
+     <string name="error_no_activity">清单中没有 Activity</string>
+     <string name="error_no_dex">APK 中没有 classes.dex</string>
+     <string name="error_not_activity">%1$s 不是 Activity</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index e0d8df3..d73f099 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <string name="app_name">Armbat</string>
++    <string name="app_name">Asphalt 5 Android Evolved</string>
+ 
+     <string name="search_hint">Search</string>
+     <string name="empty_title">NO APPS</string>
+@@ -43,7 +43,7 @@
+     <string name="ok">OK</string>
+     <string name="error_permission">READ_PHONE_STATE permission denied</string>
+     <string name="storage_access_title">Storage access</string>
+-    <string name="storage_access_detail">Allow access to all files so the container can use /sdcard/armbat.</string>
++    <string name="storage_access_detail">Allow access to all files so the container can use /sdcard/asphalt5-evolved.</string>
+     <string name="error_no_activity">No activity in the manifest</string>
+     <string name="error_no_dex">No classes.dex in the APK</string>
+     <string name="error_not_activity">%1$s is not an Activity</string>

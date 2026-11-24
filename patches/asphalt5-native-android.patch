@@ -1,0 +1,201 @@
+--- a/guest.c
++++ b/guest.c
+@@ -1,14 +1,16 @@
+ #define _CRT_SECURE_NO_WARNINGS
+ #include "guest.h"
+ 
+-#include <windows.h>
++#include <pthread.h>
++#include <sys/mman.h>
++#include <unistd.h>
+ #include <stdarg.h>
+ #include <stdlib.h>
+ #include <time.h>
+ 
+ uint8_t *g_mem = NULL;
+ uint32_t g_load_bias = 0;
+-int g_verbose = 1;
++int g_verbose = 0;
+ int g_instruction_budget = 0;
+ 
+ #define MEM_SIZE 0x100000000ull
+@@ -17,40 +19,42 @@ int g_instruction_budget = 0;
+ 
+ int guest_commit(uint32_t addr, uint32_t size, uint32_t protect)
+ {
+-    void *p = VirtualAlloc(g_mem + addr, size, MEM_COMMIT, protect);
+-    if (!p) {
+-        fprintf(stderr, "[guest] VirtualAlloc commit %08x+%x failed: %lu\n",
+-                addr, size, (unsigned long)GetLastError());
+-        return -1;
+-    }
+-    return 0;
++    long page = sysconf(_SC_PAGESIZE);
++    uint64_t end = (uint64_t)addr + size;
++    if (!g_mem || page <= 0 || end > MEM_SIZE) return -1;
++    if (!size) return 0;
++    uint64_t first = addr - addr % (uint64_t)page;
++    uint64_t last = ((end + page - 1) / page) * page;
++    return mprotect(g_mem + first, last - first, (int)protect);
+ }
+ 
+ int guest_mem_init(void)
+ {
+-    g_mem = (uint8_t *)VirtualAlloc(NULL, MEM_SIZE, MEM_RESERVE, PAGE_NOACCESS);
+-    if (!g_mem) {
+-        fprintf(stderr, "[guest] cannot reserve 4 GiB: %lu\n", (unsigned long)GetLastError());
++    if (g_mem) return -1;
++    /* MAP_NORESERVE keeps the 4 GiB reservation and the large heap arena
++     * out of the commit charge; pages are only backed when touched. */
++    void *base = mmap(NULL, MEM_SIZE, PROT_NONE,
++                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++    if (base == MAP_FAILED) return -1;
++    g_mem = base;
++    /* ELF image + BSS, guest stack, scratch, host data/JNI area.  The whole
++     * bump-heap arena is committed up front like the reference port: the
++     * render-group packer reads slightly past the end of vertex chunks and
++     * the GL driver dereferences those client arrays directly. */
++    if (guest_commit(0, 0x01000000, PROT_READ | PROT_WRITE) ||
++        guest_commit(0x10000000, 0x01000000, PROT_READ | PROT_WRITE) ||
++        guest_commit(0x11000000, 0x2F000000, PROT_READ | PROT_WRITE) ||
++        guest_commit(0x40000000, 0x01000000, PROT_READ | PROT_WRITE) ||
++        guest_commit(0x70000000, 0x00100000, PROT_READ | PROT_WRITE)) {
++        guest_mem_shutdown();
+         return -1;
+     }
+-    /* ELF image, BSS, stacks, early heap, asset staging, synthetic objects. */
+-    if (guest_commit(0x00000000, 0x01000000, PAGE_EXECUTE_READWRITE) != 0) return -1;
+-    if (guest_commit(0x10000000, 0x01000000, PAGE_READWRITE) != 0) return -1;
+-    if (guest_commit(0x40000000, 0x01000000, PAGE_READWRITE) != 0) return -1;
+-    if (guest_commit(0x70000000, 0x00010000, PAGE_READWRITE) != 0) return -1;
+-    if (guest_commit(0xB0000000, 0x10000000, PAGE_READWRITE) != 0) return -1;
+-    /* The game's render-group packer can index slightly past the end of a
+-     * vertex chunk while assembling a frame.  Android's heap keeps those
+-     * pages mapped; commit the whole bump-heap arena so the GL driver never
+-     * faults on a read that the original platform tolerated. */
+-    if (guest_commit(0x11000000, 0x2F000000, PAGE_READWRITE) != 0) return -1;
+-    memset(g_mem, 0, 0x01000000);
+     return 0;
+ }
+ 
+ void guest_mem_shutdown(void)
+ {
+-    if (g_mem) VirtualFree(g_mem, 0, MEM_RELEASE);
++    if (g_mem) munmap(g_mem, MEM_SIZE);
+     g_mem = NULL;
+ }
+ 
+@@ -169,7 +173,7 @@ void guest_abort(CPU *cpu, const char *fmt, ...)
+         platform_crash_log(full);
+     }
+     fflush(stderr);
+-    ExitProcess(2);
++    _Exit(2);
+ }
+ 
+ void guest_unimplemented(CPU *cpu, uint32_t addr)
+@@ -353,7 +357,7 @@ static uint32_t resolve_symbol(uint32_t sym_index)
+         if (!stub && g_verbose) fprintf(stderr, "[elf] unresolved import %s\n", name);
+         return stub;
+     }
+-    return (s->st_value & ~1u) + g_load_bias;
++    return s->st_value + g_load_bias;
+ }
+ 
+ static int guest_load_elf_bytes(uint8_t *data, size_t size)
+@@ -510,7 +514,7 @@ static uint32_t g_heap_end = 0x11000000u;
+ #define GHEAP_FREE  1u
+ #define GHEAP_BINS  256
+ static uint32_t g_bins[GHEAP_BINS];
+-static SRWLOCK g_heap_lock = SRWLOCK_INIT;
++static pthread_mutex_t g_heap_lock = PTHREAD_MUTEX_INITIALIZER;
+ 
+ static void heap_ensure(uint32_t end)
+ {
+@@ -519,11 +523,11 @@ static void heap_ensure(uint32_t end)
+     if (new_end > 0x40000000u) {
+         fprintf(stderr, "[guest] heap exhausted (top=%08x request=%08x)\n", g_heap_top, end);
+         platform_crash_log("guest heap exhausted (commit limit)");
+-        ExitProcess(3);
++        _Exit(3);
+     }
+-    if (guest_commit(g_heap_end, new_end - g_heap_end, PAGE_READWRITE) != 0) {
++    if (guest_commit(g_heap_end, new_end - g_heap_end, PROT_READ | PROT_WRITE) != 0) {
+         platform_crash_log("guest heap commit failed");
+-        ExitProcess(3);
++        _Exit(3);
+     }
+     g_heap_end = new_end;
+ }
+@@ -611,9 +615,9 @@ void guest_heap_stats(uint32_t *free_bytes, uint32_t *live_bytes, uint32_t *bloc
+ 
+ void guest_heap_compact(void)
+ {
+-    AcquireSRWLockExclusive(&g_heap_lock);
++    pthread_mutex_lock(&g_heap_lock);
+     heap_sweep();
+-    ReleaseSRWLockExclusive(&g_heap_lock);
++    pthread_mutex_unlock(&g_heap_lock);
+ }
+ 
+ uint32_t guest_alloc(size_t n)
+@@ -626,12 +630,12 @@ uint32_t guest_alloc(size_t n)
+         fprintf(stderr, "[guest] refusing huge allocation %llu (top=%08x)\n",
+                 (unsigned long long)n, g_heap_top);
+         platform_crash_log("guest refusing huge allocation");
+-        ExitProcess(3);
++        _Exit(3);
+     }
+     uint32_t total = (uint32_t)((n + 15u + 16u) & ~15u);
+     if (total < 32u) total = 32u;
+ 
+-    AcquireSRWLockExclusive(&g_heap_lock);
++    pthread_mutex_lock(&g_heap_lock);
+ 
+     /* Size-class reuse.  Block header: [0]=total, [4]=magic, [8]=next free,
+      * [12]=flags; user data begins at +16.  Bins 0..254 hold exact 16-byte
+@@ -668,7 +672,7 @@ uint32_t guest_alloc(size_t n)
+         }
+         wr32(b + 8, 0);
+         wr32(b + 12, 0);
+-        ReleaseSRWLockExclusive(&g_heap_lock);
++        pthread_mutex_unlock(&g_heap_lock);
+         return b + 16u;
+     }
+ 
+@@ -682,7 +686,7 @@ uint32_t guest_alloc(size_t n)
+         fprintf(stderr, "[guest] heap exhausted (n=%llu top=%08x total=%08x)\n",
+                 (unsigned long long)n, p, total);
+         platform_crash_log("guest heap exhausted (bump)");
+-        ExitProcess(3);
++        _Exit(3);
+     }
+ retry_alloc:;
+     heap_ensure(p + total);
+@@ -691,7 +695,7 @@ retry_alloc:;
+     wr32(p + 4, GHEAP_MAGIC);
+     wr32(p + 8, 0);
+     wr32(p + 12, 0);
+-    ReleaseSRWLockExclusive(&g_heap_lock);
++    pthread_mutex_unlock(&g_heap_lock);
+     return p + 16u;
+ }
+ 
+@@ -710,7 +714,7 @@ uint32_t guest_heap_top(void)
+ void guest_free(uint32_t p)
+ {
+     if (!p || p < 0x11000010u || p >= g_heap_top) return;
+-    AcquireSRWLockExclusive(&g_heap_lock);
++    pthread_mutex_lock(&g_heap_lock);
+     uint32_t b = p - 16;
+     uint32_t total = rd32(b);
+     if (rd32(b + 4) == GHEAP_MAGIC && !(rd32(b + 12) & GHEAP_FREE) &&
+@@ -721,7 +725,7 @@ void guest_free(uint32_t p)
+         wr32(b + 8, g_bins[bin]);
+         g_bins[bin] = b;
+     }
+-    ReleaseSRWLockExclusive(&g_heap_lock);
++    pthread_mutex_unlock(&g_heap_lock);
+ }
+ 
+ uint32_t guest_realloc(uint32_t p, size_t n)

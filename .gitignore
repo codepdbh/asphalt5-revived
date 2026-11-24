@@ -1,0 +1,15 @@
+/a5/
+/workspace/
+/references/
+/logs/
+/research/
+.gradle/
+**/build/
+.cxx/
+local.properties
+*.apk
+*.obb
+*.so
+*.jks
+*.keystore
+__pycache__/
